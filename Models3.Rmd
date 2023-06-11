@@ -1,0 +1,296 @@
+---
+title: "KDD Dataset Practical Assignment DDS"
+author: "Vincent Buijtendijk"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load the required libraries
+library(caret)
+library(e1071)
+library(nnet)
+library(xgboost)
+library(gbm)
+library(rpart)
+library(randomForest)
+library(ggplot2)
+
+# Load the doParallel package, thus enabling parallel processing and make faster training possible
+
+library(doParallel)
+
+# Register the parallel backend
+registerDoParallel(cores = detectCores())
+
+```
+
+## Introduction
+
+The goals I have set myself for this assignment are the following
+
+-   Learn basics of R programming
+-   Improve similarity to real world by
+    -   Using a different initial dataset
+    -   Use KFold cross-validation
+-   Test different models on the dataset and compare their accuracy
+-   Optimize number of trees used in Random Forest to reduce computational strain
+
+## REFERENCES:
+
+List of references:
+
+-   Source data [KDD Cup 1999 Data Data Set](https://archive.ics.uci.edu/ml/datasets/kdd+cup+1999+data)
+-   A Detailed [Analysis of the KDD CUP 99 Data Set](https://www.ecb.torontomu.ca/~bagheri/papers/cisda.pdf)
+-   KDD [download archive](https://www.kdd.org/kdd-cup/view/kdd-cup-1999/Data)
+-   Kaggle comunity [notebooks](https://www.kaggle.com/datasets/galaxyh/kdd-cup-1999-data/code) with KDD CUP 99 data set.
+
+Based on the above analysis in the second reference we download the NSL-KDD dataset that offers a more realistic and improved Train and Test set (removed duplicates, removed erroneous lines, a more representative selection of records) from <https://www.kaggle.com/datasets/hassan06/nslkdd?resource=download>. We will load the KDDTestPlus.csv and KDDTrainPlus.csv datasets. Column names have been added, same names as Book1.csv and Book2.csv to avoid compatibility issues. The aim of this is to improve measuring the effectiveness of each model.
+
+We have enabled parallel computing in the setup section to improve speed as some models, such as Random Forest, are computationally very intensive.
+
+```{r loading_data, echo=FALSE, cache=TRUE}
+# Load the data
+data <- read.csv("KDDTrainPlus.csv", header = TRUE)
+
+# Select a subset of columns
+data <- data[,c("SrcBytes", "DstBytes", "Land", "WrongFragment", "Urgent", "SameSrvRate", "LoggedIn",  "DstHostSameSrvRate", "DstHostSrvCount", "Flag", "Attack")]
+
+# Convert the Attack variable to a factor type
+data$Attack <- as.factor(data$Attack)
+
+# Convert the Flag variable to a factor type
+data$Flag <- as.factor(data$Flag)
+
+
+#make a copy of data to dataLRM, as we have to modify the columns to work for LRM
+dataLRM <- data
+
+# to dataLRM add a new column "AttackBoolean" with 0 for normal traffic and 1 for an attack. This is required for the LRM model.
+dataLRM$AttackBoolean <- ifelse(dataLRM$Attack == "normal", 0, 1)
+# Convert the AttackBoolean variable to a factor type
+dataLRM$AttackBoolean <- as.factor(dataLRM$AttackBoolean)
+# Remove the original Attack variable from the data to avoid convergence in LRM model
+dataLRM <- dataLRM[, !names(data) %in% "Attack"]
+
+
+```
+
+The following section sets up the data in different folds, which is a technique used in cross-validation this is a method for assessing the performance of a machine learning model. Cross-validation helps to estimate how well a model will generalize to unseen data by evaluating its performance on different subsets of the training data. It provides a better estimation of accuracy of each model.
+
+```{r cross_validation, echo=TRUE, cache=TRUE}
+# Set the seed for reproducibility
+set.seed(123)
+
+#Set the number of folds
+k <- 10
+
+# Create a cross-validation object
+cv <- trainControl(method = "cv", number = k)
+
+```
+
+In the following section we are trying to determine the optimum number of trees to be used in RandomForest. As this takes very long to execute (10 folds) and causes memory problems on higher numbers of trees we added a switch to run or not. If set to TRUE it will run, if not it will present earlier calculated results for the purpose of this document.
+
+```{r determineTreesRandomForest, echo=FALSE}
+
+run_code <- FALSE # Change this to TRUE to run the code in this chunk
+
+if (run_code) {
+  tree_numbers <- c(10, 50, 100, 200)
+  accuracies <- c()
+
+  for (ntree in tree_numbers) {
+    model <- train(Attack ~ ., data = data, method = "rf", trControl = cv, tuneGrid = data.frame(mtry = 2), ntree = ntree)
+    accuracies <- c(accuracies, model$results$Accuracy)
+    message(paste("Completed iteration for ntree =", ntree))
+  }
+
+  # Plot the accuracy based on the number of trees
+  plot(tree_numbers, accuracies, type = "b", xlab = "Number of Trees", ylab = "Accuracy", main = "Accuracy vs. Number of Trees")
+
+  # Print a simple table with accuracy by number of trees
+  cat("Number of Trees", "Accuracy\n")
+  for (i in 1:length(tree_numbers)) {
+    cat(tree_numbers[i], "          ", accuracies[i], "\n")
+  }
+} else {
+  cat("The code in this chunk is not being executed, however presenting earlier calculated data below:")
+    # Use the provided data to create the plot and table
+  tree_numbers <- c(10, 50, 100, 200, 300, 400)
+  accuracies <- c(0.9067746, 0.9084092, 0.9064723, 0.9079169, 0.9071708, 0.9070437)
+
+  # Plot the accuracy based on the number of trees
+  plot(tree_numbers, accuracies, type = "b", xlab = "Number of Trees", ylab = "Accuracy", main = "Accuracy vs. Number of Trees")
+
+  # Print a simple table with accuracy by number of trees
+  cat("Number of Trees", "Accuracy\n")
+  for (i in 1:length(tree_numbers)) {
+    cat(tree_numbers[i], "          ", accuracies[i], "\n")
+  }
+}
+
+```
+
+Apply the LRM model
+
+```{r LRM, echo=TRUE, cache=TRUE}
+# Fit the Logistic Regression model using cross-validation
+logistic_regression_model <- train(AttackBoolean ~ ., data = dataLRM, method = "glm", family = "binomial", trControl = cv)
+
+```
+
+Apply the Decision Tree Model
+
+```{r DecisionTree, echo=TRUE, cache=TRUE}
+# Fit the Decision Tree model using cross-validation
+decision_tree_model <- train(Attack ~ ., data = data, method = "rpart", trControl = cv)
+
+```
+
+Apply Randomforest model. Based on earlier calculations the optimal number of trees is 50, so this will be applied here.
+
+```{r RandomForest, echo=TRUE, cache=TRUE}
+
+# Create a cross-validation object with verbose output
+cv <- trainControl(method = "cv", number = k, verboseIter = TRUE)
+
+# Fit the Random Forest model using cross-validation and verbose output
+random_forest_model <- train(Attack ~ ., data = data, method = "rf", trControl = cv, tuneGrid = data.frame(mtry = 2), ntree = 50)
+
+```
+
+The following section prints the results of each of the models.
+
+```{r PrintResults, echo=FALSE, include=TRUE}
+# Print the results with performance metrics for Logistic Regression
+cat("Logistic Regression Model:\n")
+print(logistic_regression_model)
+cat("Accuracy:", logistic_regression_model$results$Accuracy, "\n")
+
+# Calculate performance metrics for Logistic Regression
+logistic_regression_pred <- predict(logistic_regression_model, newdata = dataLRM)
+logistic_regression_cm <- confusionMatrix(logistic_regression_pred, dataLRM$AttackBoolean)
+cat("Logistic Regression Precision:", logistic_regression_cm$byClass["Pos Pred Value"], "\n")
+cat("Logistic Regression Recall:", logistic_regression_cm$byClass["Sensitivity"], "\n")
+cat("Logistic Regression F1-score:", logistic_regression_cm$byClass["F1"], "\n")
+
+
+# Print the results with performance metrics for Decision Tree
+cat("Decision Tree Model:\n")
+print(decision_tree_model)
+cat("Accuracy:", max(decision_tree_model$results$Accuracy), "\n")
+
+# Predict on the training data using the decision tree model
+decision_tree_pred <- predict(decision_tree_model, newdata = data, type = "raw")
+
+# Calculate overall performance metrics for Decision Tree
+decision_tree_metrics <- confusionMatrix(decision_tree_pred, data$Attack, positive = NULL)
+decision_tree_precision <- mean(decision_tree_metrics$byClass[, "Pos Pred Value"], na.rm = TRUE)
+decision_tree_recall <- mean(decision_tree_metrics$byClass[, "Sensitivity"], na.rm = TRUE)
+decision_tree_f1 <- mean(decision_tree_metrics$byClass[, "F1"], na.rm = TRUE)
+
+cat("Decision Tree Precision:", decision_tree_precision, "\n")
+cat("Decision Tree Recall:", decision_tree_recall, "\n")
+cat("Decision Tree F1-score:", decision_tree_f1, "\n")
+
+
+# Print the results with performance metrics for Random Forest
+cat("Random Forest Model:\n")
+print(random_forest_model)
+cat("Accuracy:", random_forest_model$results$Accuracy, "\n")
+
+# Predict on the training data using the random forest model
+random_forest_pred <- predict(random_forest_model, newdata = data, type = "raw")
+
+# Calculate overall performance metrics for Random Forest
+random_forest_metrics <- confusionMatrix(random_forest_pred, data$Attack, positive = NULL)
+random_forest_precision <- mean(random_forest_metrics$byClass[, "Pos Pred Value"], na.rm = TRUE)
+random_forest_recall <- mean(random_forest_metrics$byClass[, "Sensitivity"], na.rm = TRUE)
+random_forest_f1 <- mean(random_forest_metrics$byClass[, "F1"], na.rm = TRUE)
+
+cat("Random Forest Precision:", random_forest_precision, "\n")
+cat("Random Forest Recall:", random_forest_recall, "\n")
+cat("Random Forest F1-score:", random_forest_f1, "\n")
+
+```
+
+Now determine the model with the best score based on the data set supplied:
+
+```{r BestModelDetermination, echo=FALSE, include=TRUE}
+model_accuracies <- c(
+  "Logistic Regression" = logistic_regression_model$results$Accuracy,
+  "Decision Tree" = decision_tree_model$results$Accuracy,
+  "Random Forest" = random_forest_model$results$Accuracy
+)
+
+# Find the model with the highest accuracy
+best_model_name <- names(which.max(model_accuracies))
+best_model_accuracy <- max(model_accuracies)
+
+# Print the best model and its accuracy
+cat("Best Model:", best_model_name, "\n")
+cat("Best Model Accuracy:", best_model_accuracy, "\n")
+
+# Store the accuracy of each model in a named vector
+model_accuracies <- c(
+  "Logistic Regression" = logistic_regression_model$results$Accuracy,
+  "Decision Tree" = decision_tree_model$results$Accuracy,
+  "Random Forest" = random_forest_model$results$Accuracy
+)
+
+# Create a bar plot of the accuracy of each model
+barplot(model_accuracies, main = "Model Accuracy Comparison", ylab = "Accuracy", col = "lightblue")
+
+```
+
+
+In order to better compare the models, we can scatterplot with the two most relevant scores on X and Y axis, respectively accuracy and f1 score.
+
+
+```{r Scatterplot, echo=FALSE, include=TRUE}
+
+# Create data frames for each model
+logistic_regression_data <- data.frame(
+  Model = "Logistic Regression",
+  Accuracy = logistic_regression_model$results$Accuracy,
+  F1 = logistic_regression_cm$byClass["F1"]
+)
+
+decision_tree_data <- data.frame(
+  Model = "Decision Tree",
+  Accuracy = decision_tree_model$results$Accuracy,
+  F1 = mean(confusionMatrix(predict(decision_tree_model, newdata = data, type = "raw"), data$Attack, positive = "attack")$byClass[, "F1"], na.rm = TRUE)
+)
+
+random_forest_data <- data.frame(
+  Model = "Random Forest",
+  Accuracy = random_forest_model$results$Accuracy,
+  F1 = mean(confusionMatrix(predict(random_forest_model, newdata = data, type = "raw"), data$Attack, positive = "attack")$byClass[, "F1"], na.rm = TRUE)
+)
+
+# Combine the data frames using rbind
+model_data <- rbind(logistic_regression_data, decision_tree_data, random_forest_data)
+
+# Create the scatterplot
+scatterplot <- ggplot(model_data, aes(x = Accuracy, y = F1, color = Model, label = Model)) +
+  geom_point(size = 4) +
+  geom_text(aes(label = Model), vjust = -1, hjust = 1, size = 4) +
+  labs(title = "Scplot of Accuracy vs F1 Score", x = "Accuracy", y = "F1 Score") +
+  theme_minimal() +
+  scale_color_manual(values = c("Logistic Regression" = "blue", "Decision Tree" = "red", "Random Forest" = "green"))
+
+print(scatterplot)
+
+```
+
+
+
+## Conclusions
+
+We compared 3 different models. Looking at both the accuracy and F1 scores it looks as though LRM is a good model both for accuracy and F1 score on this dataset, and computationally relatively less expensive.
+Some points remain open for future such as determining if more Trees in RandomForest lead to better F1 results. Also other models could be added and tweak more parameters in current models.
